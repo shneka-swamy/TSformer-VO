@@ -9,14 +9,17 @@ import os
 import numpy as np
 from tqdm import tqdm
 from torch.utils.mobile_optimizer import optimize_for_mobile
+import time
 
-# NOTE: This code is the edited version of the original code -- changed for android
-# Set the below variable to False for the original code
-store_android = False
+# This is to store the model for android studio usage
+store_android = True
+
 
 checkpoint_path = "checkpoints/"
+#checkpoint_name = "checkpoint_model3_exp20"
 checkpoint_name = "checkpoint_model1_exp12"
-sequences = ["01"]
+
+sequences = ['10']
 #["01", "03", "04", "05", "06", "07", "10"]
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,42 +63,37 @@ model.load_state_dict(checkpoint['model_state_dict'])
 if torch.cuda.is_available():
     model.cuda()
 
+# TODO: Add zip files if it does not work
 if store_android:
-   #model.zero_grad()
-   #model.eval()
+    pt_model = torch.jit.script(model)
+    torch.save(pt_model.state_dict(), "model.pt")
+    print("Stored the pt model")
 
-   # Quantize the model -- does not work -- not implemented error
-   #torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
-   pt_model = torch.jit.script(model)
-   torch.save(pt_model.state_dict(), "model.pt", _use_new_zipfile_serialization=False)
-   print("Stored the pt model")
-
-   # Optimize for mobile
-   optimized_model = optimize_for_mobile(pt_model)
-   optimized_model._save_for_lite_interpreter("model.ptl") 
-   print("Stored the optimized model")
+    optimized_model = optimize_for_mobile(pt_model)
+    optimized_model._save_for_lite_interpreter("model.ptl")
+    print("Stored the model in lite format")
 
 else:
     for sequence in sequences:
         # test dataloader
-        model.load_state_dict(torch.load("model.pt", map_location=torch.device(device)))
-
         dataset = KITTI(transform=preprocess, sequences=[sequence],
                         window_size=args["window_size"], overlap=args["overlap"])
         test_loader = torch.utils.data.DataLoader(dataset,
                                                 batch_size=1,
                                                 shuffle=False,
                                                 )
-
+        
         with tqdm(test_loader, unit="batch") as batchs:
             pred_poses = torch.zeros((1, args["window_size"] - 1, 6), device=device)
             batchs.set_description(f"Sequence {sequence}")
+            
+            start_time = time.time()
             for images, gt in batchs:
                 if torch.cuda.is_available():
                     images, gt = images.cuda(), gt.cuda()
 
                     with torch.no_grad():
-                       # model.eval()
+                        model.eval()
                         model.training = False
 
                         # predict pose
@@ -103,7 +101,11 @@ else:
                         pred_pose = torch.reshape(pred_pose, (args["window_size"] - 1, 6)).to(device)
                         pred_pose = pred_pose.unsqueeze(dim=0)
                         pred_poses = torch.concat((pred_poses, pred_pose), dim=0)
-        
+            end_time = time.time()
+            time_taken = end_time - start_time
+            print('Number of images', len(batchs))
+            print("Average time taken: ", time_taken/len(batchs))
+
     # save as numpy array
     pred_poses = pred_poses[1:, :, :].cpu().detach().numpy()
 
