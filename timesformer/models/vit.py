@@ -18,6 +18,8 @@ from .build import MODEL_REGISTRY
 from torch import einsum
 from einops import rearrange, reduce, repeat
 
+from typing import Optional, List
+
 def _cfg(url='', **kwargs):
     return {
         'url': url,
@@ -112,7 +114,7 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
 
-    def forward(self, x, B, T, W):
+    def forward(self, x: torch.Tensor, B: int, T: int, W: int):
         num_spatial_tokens = (x.size(1) - 1) // T
         H = num_spatial_tokens // W
 
@@ -123,27 +125,39 @@ class Block(nn.Module):
         elif self.attention_type == 'divided_space_time':
             ## Temporal
             xt = x[:,1:,:]
-            xt = rearrange(xt, 'b (h w t) m -> (b h w) t m',b=B,h=H,w=W,t=T)
+            # TODO: Convert rearrange to view
+            xt= xt.view(B*H*W, T, -1)
+            #xt = rearrange(xt, 'b (h w t) m -> (b h w) t m',b=B,h=H,w=W,t=T)
+            #print("Shape of xt is", xt.shape)
+
             res_temporal = self.drop_path(self.temporal_attn(self.temporal_norm1(xt)))
-            res_temporal = rearrange(res_temporal, '(b h w) t m -> b (h w t) m',b=B,h=H,w=W,t=T)
+            res_temporal = res_temporal.view(B, H*W*T, -1)
+            
+            #res_temporal = rearrange(res_temporal, '(b h w) t m -> b (h w t) m',b=B,h=H,w=W,t=T)
             res_temporal = self.temporal_fc(res_temporal)
             xt = x[:,1:,:] + res_temporal
 
             ## Spatial
             init_cls_token = x[:,0,:].unsqueeze(1)
             cls_token = init_cls_token.repeat(1, T, 1)
-            cls_token = rearrange(cls_token, 'b t m -> (b t) m',b=B,t=T).unsqueeze(1)
+            cls_token = cls_token.view(B*T, -1).unsqueeze(1)
+            #cls_token = rearrange(cls_token, 'b t m -> (b t) m',b=B,t=T).unsqueeze(1)
             xs = xt
-            xs = rearrange(xs, 'b (h w t) m -> (b t) (h w) m',b=B,h=H,w=W,t=T)
+            xs = xs.view(B*T, H*W, -1)
+            #xs = rearrange(xs, 'b (h w t) m -> (b t) (h w) m',b=B,h=H,w=W,t=T)
             xs = torch.cat((cls_token, xs), 1)
             res_spatial = self.drop_path(self.attn(self.norm1(xs)))
 
             ### Taking care of CLS token
             cls_token = res_spatial[:,0,:]
-            cls_token = rearrange(cls_token, '(b t) m -> b t m',b=B,t=T)
+            cls_token = cls_token.view(B, T, -1)
+            #cls_token = rearrange(cls_token, '(b t) m -> b t m',b=B,t=T)
             cls_token = torch.mean(cls_token,1,True) ## averaging for every frame
             res_spatial = res_spatial[:,1:,:]
-            res_spatial = rearrange(res_spatial, '(b t) (h w) m -> b (h w t) m',b=B,h=H,w=W,t=T)
+            res_spatial = res_spatial.view(B, T, H, W, -1)
+            res_spatial = res_spatial.permute(0,2,3,1,4)
+            res_spatial = res_spatial.reshape(B, H*W*T, -1)
+            #res_spatial = rearrange(res_spatial, '(b t) (h w) m -> b (h w t) m',b=B,h=H,w=W,t=T)
             res = res_spatial
             x = xt
 
@@ -168,7 +182,8 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x):
         B, C, T, H, W = x.shape
-        x = rearrange(x, 'b c t h w -> (b t) c h w')
+        x = x.view(B*T, C, H, W)
+        #x = rearrange(x, 'b c t h w -> (b t) c h w')
         x = self.proj(x)
         W = x.size(-1)
         x = x.flatten(2).transpose(1, 2)
@@ -246,9 +261,10 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x):
+    def forward_features(self, x: torch.Tensor):
         B = x.shape[0]
         x, T, W = self.patch_embed(x)
+        #print("value of T is ", T)
         cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
@@ -272,9 +288,12 @@ class VisionTransformer(nn.Module):
 
         ## Time Embeddings
         if self.attention_type != 'space_only':
+            print('shape before time embed',x.shape)
             cls_tokens = x[:B, 0, :].unsqueeze(1)
             x = x[:,1:]
-            x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T)
+            x = x.permute(1, 0, 2)
+            #x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T)
+            #print('shape after rearrange',x.shape)
             ## Resizing time embeddings in case they don't match
             if T != self.time_embed.size(1):
                 time_embed = self.time_embed.transpose(1, 2)
@@ -284,16 +303,25 @@ class VisionTransformer(nn.Module):
             else:
                 x = x + self.time_embed
             x = self.time_drop(x)
-            x = rearrange(x, '(b n) t m -> b (n t) m',b=B,t=T)
+            # TODO: This hardcoding must be changed
+            x = x.reshape(1, 960, 384)
+            #x = rearrange(x, '(b n) t m -> b (n t) m',b=B,t=T)
+            #print(B, T)
+            #print('shape after rearrange',x.shape)
             x = torch.cat((cls_tokens, x), dim=1)
 
         ## Attention blocks
         for blk in self.blocks:
             x = blk(x, B, T, W)
+            assert x is not None, "x might be None?" # TODO: not sure if condition is correct
 
+        print("value of T is:", T)
         ### Predictions for space-only baseline
         if self.attention_type == 'space_only':
-            x = rearrange(x, '(b t) n m -> b t n m',b=B,t=T)
+            assert False, "Space only attention is not implemented yet"
+            # TODO: This must be changed
+            #x = x.reshape(1, 960, 384)
+            #x = rearrange(x, '(b t) n m -> b t n m',b=B,t=T)
             x = torch.mean(x, 1) # averaging predictions for every frame
 
         x = self.norm(x)

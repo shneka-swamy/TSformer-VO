@@ -8,11 +8,16 @@ import torch.nn as nn
 import os
 import numpy as np
 from tqdm import tqdm
+from torch.utils.mobile_optimizer import optimize_for_mobile
 
+# NOTE: This code is the edited version of the original code -- changed for android
+# Set the below variable to False for the original code
+store_android = False
 
-checkpoint_path = "checkpoints/Exp3"
-checkpoint_name = "checkpoint_e90"
-sequences = ["01", "03", "04", "05", "06", "07", "10"]
+checkpoint_path = "checkpoints/"
+checkpoint_name = "checkpoint_model1_exp12"
+sequences = ["01"]
+#["01", "03", "04", "05", "06", "07", "10"]
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -55,37 +60,54 @@ model.load_state_dict(checkpoint['model_state_dict'])
 if torch.cuda.is_available():
     model.cuda()
 
+if store_android:
+   #model.zero_grad()
+   #model.eval()
 
-for sequence in sequences:
-    # test dataloader
-    dataset = KITTI(transform=preprocess, sequences=[sequence],
-                    window_size=args["window_size"], overlap=args["overlap"])
-    test_loader = torch.utils.data.DataLoader(dataset,
-                                              batch_size=1,
-                                              shuffle=False,
-                                             )
+   # Quantize the model -- does not work -- not implemented error
+   #torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+   pt_model = torch.jit.script(model)
+   torch.save(pt_model.state_dict(), "model.pt", _use_new_zipfile_serialization=False)
+   print("Stored the pt model")
 
-    with tqdm(test_loader, unit="batch") as batchs:
-      pred_poses = torch.zeros((1, args["window_size"] - 1, 6), device=device)
-      batchs.set_description(f"Sequence {sequence}")
-      for images, gt in batchs:
-        if torch.cuda.is_available():
-          images, gt = images.cuda(), gt.cuda()
+   # Optimize for mobile
+   optimized_model = optimize_for_mobile(pt_model)
+   optimized_model._save_for_lite_interpreter("model.ptl") 
+   print("Stored the optimized model")
 
-          with torch.no_grad():
-            model.eval()
-            model.training = False
+else:
+    for sequence in sequences:
+        # test dataloader
+        model.load_state_dict(torch.load("model.pt", map_location=torch.device(device)))
 
-            # predict pose
-            pred_pose = model(images.float())
-            pred_pose = torch.reshape(pred_pose, (args["window_size"] - 1, 6)).to(device)
-            pred_pose = pred_pose.unsqueeze(dim=0)
-            pred_poses = torch.concat((pred_poses, pred_pose), dim=0)
-    
-# save as numpy array
-pred_poses = pred_poses[1:, :, :].cpu().detach().numpy()
+        dataset = KITTI(transform=preprocess, sequences=[sequence],
+                        window_size=args["window_size"], overlap=args["overlap"])
+        test_loader = torch.utils.data.DataLoader(dataset,
+                                                batch_size=1,
+                                                shuffle=False,
+                                                )
 
-save_dir = os.path.join(args["checkpoint_path"], checkpoint_name)
-if not os.path.exists(save_dir):
-    os.makedirs(save_dir)
-np.save(os.path.join(save_dir, "pred_poses_{}.npy".format(sequence)), pred_poses)
+        with tqdm(test_loader, unit="batch") as batchs:
+            pred_poses = torch.zeros((1, args["window_size"] - 1, 6), device=device)
+            batchs.set_description(f"Sequence {sequence}")
+            for images, gt in batchs:
+                if torch.cuda.is_available():
+                    images, gt = images.cuda(), gt.cuda()
+
+                    with torch.no_grad():
+                       # model.eval()
+                        model.training = False
+
+                        # predict pose
+                        pred_pose = model(images.float())
+                        pred_pose = torch.reshape(pred_pose, (args["window_size"] - 1, 6)).to(device)
+                        pred_pose = pred_pose.unsqueeze(dim=0)
+                        pred_poses = torch.concat((pred_poses, pred_pose), dim=0)
+        
+    # save as numpy array
+    pred_poses = pred_poses[1:, :, :].cpu().detach().numpy()
+
+    save_dir = os.path.join(args["checkpoint_path"], checkpoint_name)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    np.save(os.path.join(save_dir, "pred_poses_{}.npy".format(sequence)), pred_poses)
