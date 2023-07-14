@@ -9,17 +9,25 @@ import os
 import numpy as np
 from tqdm import tqdm
 from torch.utils.mobile_optimizer import optimize_for_mobile
+from torch.jit.mobile import (
+    _backport_for_mobile,   
+    _get_model_bytecode_version,
+)
+
 
 # NOTE: This code is the edited version of the original code -- changed for android
 # Set the below variable to False for the original code
-store_android = False
+store_android = True
 
 checkpoint_path = "checkpoints/"
 checkpoint_name = "checkpoint_model1_exp12"
 sequences = ["01"]
 #["01", "03", "04", "05", "06", "07", "10"]
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+if store_android:
+    device = "cpu"
+else:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # read hyperparameters and configuration
 with open(os.path.join(checkpoint_path, "args.pkl"), 'rb') as f:
@@ -55,27 +63,45 @@ model = VisionTransformer(img_size=model_params["image_size"],
                           attention_type=model_params["attention_type"])
 
 checkpoint = torch.load(os.path.join(args["checkpoint_path"], "{}.pth".format(checkpoint_name)),
-                        map_location=torch.device(device))
+                             map_location=torch.device(device))
 model.load_state_dict(checkpoint['model_state_dict'])
-if torch.cuda.is_available():
-    model.cuda()
 
 if store_android:
-   #model.zero_grad()
-   #model.eval()
+   model = model.to(device)
+#    pt_model = torch.jit.script(model)
+#    torch.save(pt_model.state_dict(), "model.pt", _use_new_zipfile_serialization=False)
+#    print("Stored the pt model")
+#    model.load_state_dict(torch.load("model.pt"))
+#    print("Loaded the pt model")
+   model.zero_grad()
+   model.eval()
+   print("Model eval done")
 
-   # Quantize the model -- does not work -- not implemented error
-   #torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
-   pt_model = torch.jit.script(model)
-   torch.save(pt_model.state_dict(), "model.pt", _use_new_zipfile_serialization=False)
-   print("Stored the pt model")
-
+   #quantized_model = torch.quantization.quantize_dynamic(model, qconfig_spec={torch.nn.Linear}, dtype=torch.qint8)
+   #print("Quantized the model")
+   #dummy_image = torch.zeros(1, 3, 2, 192, 640, dtype=torch.float32)
+   ts_model = torch.jit.script(model)
+   #ts_model = torch.jit.trace(model, dummy_image)
+   print("Traced the model")
+   optimized_torchscript_model = optimize_for_mobile(ts_model)
+   optimized_torchscript_model._save_for_lite_interpreter("model.ptl")
+   print("Stored the ts model")
+   # Load the stored model
+   model_new = torch.jit.mobile._load_for_lite_interpreter("model.ptl")
+   print("Loaded the ts model")
    # Optimize for mobile
-   optimized_model = optimize_for_mobile(pt_model)
-   optimized_model._save_for_lite_interpreter("model.ptl") 
-   print("Stored the optimized model")
+#    optimized_model = optimize_for_mobile(pt_model)
+#    optimized_model._save_for_lite_interpreter("model.ptl") 
+#    print("Stored the optimized model")
+#    _backport_for_mobile(f_input="model.ptl", f_output="model_v6.ptl", to_version=6)
+#    print("Stored the backported model")
+#    print("Model bytecode version, old: ", _get_model_bytecode_version(f_input="model.ptl"))
+#    print("Model bytecode version, new: ", _get_model_bytecode_version(f_input="model_v5.ptl"))
 
 else:
+    if torch.cuda.is_available():
+        model.cuda()
+
     for sequence in sequences:
         # test dataloader
         model.load_state_dict(torch.load("model.pt", map_location=torch.device(device)))
@@ -93,6 +119,7 @@ else:
             for images, gt in batchs:
                 if torch.cuda.is_available():
                     images, gt = images.cuda(), gt.cuda()
+                    print("Images shape: ", images.shape)
 
                     with torch.no_grad():
                        # model.eval()

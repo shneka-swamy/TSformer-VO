@@ -5,10 +5,7 @@
 import torch
 import torch.nn as nn
 from functools import partial
-import math
-import warnings
 import torch.nn.functional as F
-import numpy as np
 
 from timesformer.models.vit_utils import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timesformer.models.helpers import load_pretrained
@@ -72,6 +69,7 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         if self.with_qkv:
+           #qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, torch.div(C, self.num_heads, rounding_mode='floor')).permute(2, 0, 3, 1, 4)
            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
            q, k, v = qkv[0], qkv[1], qkv[2]
         else:
@@ -197,6 +195,9 @@ class VisionTransformer(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', dropout=0.):
         super().__init__()
+        # self.num_classes = num_classes
+        # self.dummy = nn.Linear(3 * 2 * 192 * 640, num_classes)
+        # return
         self.attention_type = attention_type
         self.depth = depth
         self.dropout = nn.Dropout(dropout)
@@ -230,16 +231,16 @@ class VisionTransformer(nn.Module):
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
 
-        # initialization of temporal attention weights
-        # if self.attention_type == 'divided_space_time':
-        #     i = 0
-        #     for m in self.blocks.modules():
-        #         m_str = str(m)
-        #         if 'Block' in m_str:
-        #             if i > 0:
-        #               nn.init.constant_(m.temporal_fc.weight, 0)
-        #               nn.init.constant_(m.temporal_fc.bias, 0)
-        #             i += 1
+        #initialization of temporal attention weights
+        if self.attention_type == 'divided_space_time':
+            i = 0
+            for m in self.blocks.modules():
+                m_str = str(m)
+                if 'Block' in m_str:
+                    if i > 0:
+                      nn.init.constant_(m.temporal_fc.weight, 0)
+                      nn.init.constant_(m.temporal_fc.bias, 0)
+                    i += 1
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

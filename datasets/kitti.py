@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 from PIL import Image
-from datasets.utils import rotation_to_euler
+from utils import rotation_to_euler
 import torch
 import matplotlib.pyplot as plt
 from torchvision import transforms
@@ -186,6 +186,7 @@ class KITTI(torch.utils.data.Dataset):
                 w_idx = w_idx + 1
                 windowed_df = pd.concat([windowed_df, rows], ignore_index=True)
         windowed_df.reset_index(drop=True)
+
         return windowed_df
 
 
@@ -199,7 +200,7 @@ if __name__ == "__main__":
             mean=[0.34721234, 0.36705238, 0.36066107],
             std=[0.30737526, 0.31515116, 0.32020183]), ])
 
-    data = KITTI(transform=preprocess, sequences=["04"], window_size=3, overlap=2)
+    data = KITTI(transform=preprocess, sequences=["04"], window_size=4, overlap=2)
     test_loader = torch.utils.data.DataLoader(data, batch_size=1, shuffle=False)
 
     timings = np.zeros((len(test_loader), 1))
